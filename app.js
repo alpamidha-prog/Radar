@@ -1,6 +1,7 @@
 // Configuration
 const API_URL = 'https://opensky-network.org/api/states/all?lamin=59.8&lomin=20.6&lamax=70.1&lomax=31.6';
-const UPDATE_INTERVAL = 10000; // 10 seconds
+const PROXY_URL = 'https://api.allorigins.win/raw?url=';
+const UPDATE_INTERVAL = 15000; // 15 seconds to be safe with OpenSky rate limits
 
 // State
 let flightMarkers = {};
@@ -95,7 +96,19 @@ function updateSidePanel(flightData) {
  */
 async function updateFlightData() {
     try {
-        const response = await fetch(API_URL);
+        let response;
+        try {
+            // Attempt direct fetch first
+            response = await fetch(API_URL);
+            if (!response.ok && response.status === 429) {
+                console.warn('Rate limited, trying proxy...');
+                throw new Error('Rate limit');
+            }
+        } catch (e) {
+            // Fallback to proxy if direct fetch fails (CORS, network, or Rate Limit)
+            console.log('Direct fetch failed, trying proxy...', e);
+            response = await fetch(PROXY_URL + encodeURIComponent(API_URL));
+        }
         
         if (!response.ok) {
             throw new Error(`API returned ${response.status}: ${response.statusText}`);
