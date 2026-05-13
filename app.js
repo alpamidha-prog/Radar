@@ -1,11 +1,19 @@
 // Configuration
-const API_URL = 'https://opensky-network.org/api/states/all?lamin=59.8&lomin=20.6&lamax=70.1&lomax=31.6';
-const PROXY_URL = 'https://api.allorigins.win/raw?url=';
-const UPDATE_INTERVAL = 15000; // 15 seconds to be safe with OpenSky rate limits
+const API_URLS = {
+    ADSB_LOL: 'https://api.adsb.lol/v2/lat/64.9/lon/26.0/dist/800',
+    OPENSKY: 'https://opensky-network.org/api/states/all?lamin=59.8&lomin=20.6&lamax=70.1&lomax=31.6'
+};
+const PROXIES = [
+    '', // Direct
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?'
+];
+const UPDATE_INTERVAL = 15000;
 
 // State
 let flightMarkers = {};
 let selectedFlightIcao = null;
+let currentSource = 'ADSB_LOL';
 let weatherLayer = null;
 let radarTimestamps = [];
 let radarLayers = {}; // Cache for layers
@@ -64,161 +72,172 @@ function updateSidePanel(flightData) {
 
     panel.classList.remove('hidden');
     
-    // Unpack data (following OpenSky response schema)
-    const callsign = (flightData[1] || 'Unknown').trim();
-    const country = flightData[2] || 'Unknown';
-    const altitude = flightData[7] || 0; // meters
-    const velocity = flightData[9] || 0; // m/s
-    const heading = flightData[10] || 0; // degrees
-    const vRate = flightData[11] || 0; // m/s
+    // Normalize data (handle both adsb.lol and OpenSky formats)
+    let info = {};
+    if (flightData.source === 'ADSB_LOL') {
+        info = {
+            callsign: (flightData.flight || 'Unknown').trim(),
+            country: flightData.t || 'Unknown', // adsb.lol uses 't' for type, country not always available
+            altFt: flightData.alt_baro || 0,
+            speedKt: Math.round(flightData.gs || 0),
+            heading: flightData.track || 0,
+            vRateFtMin: flightData.baro_rate || 0
+        };
+    } else {
+        // OpenSky
+        const alt = flightData[7] || 0;
+        const vel = flightData[9] || 0;
+        const vRate = flightData[11] || 0;
+        info = {
+            callsign: (flightData[1] || 'Unknown').trim(),
+            country: flightData[2] || 'Unknown',
+            altFt: Math.round(alt * 3.28084),
+            speedKt: Math.round(vel * 1.94384),
+            heading: flightData[10] || 0,
+            vRateFtMin: Math.round(vRate * 196.85)
+        };
+    }
 
-    // Conversions
-    const altFt = Math.round(altitude * 3.28084);
-    const speedKt = Math.round(velocity * 1.94384);
-    const vRateFtMin = Math.round(vRate * 196.85);
-
-    document.getElementById('detail-callsign').innerText = callsign || 'N/A';
-    document.getElementById('detail-country').innerText = country;
-    document.getElementById('detail-altitude').innerText = altitude !== null ? `${altFt.toLocaleString()} ft` : 'N/A';
-    document.getElementById('detail-velocity').innerText = velocity !== null ? `${speedKt.toLocaleString()} kt` : 'N/A';
-    document.getElementById('detail-heading').innerText = heading !== null ? `${Math.round(heading)}°` : 'N/A';
+    document.getElementById('detail-callsign').innerText = info.callsign || 'N/A';
+    document.getElementById('detail-country').innerText = info.country;
+    document.getElementById('detail-altitude').innerText = `${info.altFt.toLocaleString()} ft`;
+    document.getElementById('detail-velocity').innerText = `${info.speedKt.toLocaleString()} kt`;
+    document.getElementById('detail-heading').innerText = `${Math.round(info.heading)}°`;
     
     // Format vertical rate with sign
     let vRateText = 'Level';
-    if (vRateFtMin > 50) vRateText = `+${vRateFtMin} ft/min ↗`;
-    else if (vRateFtMin < -50) vRateText = `${vRateFtMin} ft/min ↘`;
+    if (info.vRateFtMin > 50) vRateText = `+${info.vRateFtMin} ft/min ↗`;
+    else if (info.vRateFtMin < -50) vRateText = `${info.vRateFtMin} ft/min ↘`;
     
-    document.getElementById('detail-vrate').innerText = vRate !== null ? vRateText : 'N/A';
+    document.getElementById('detail-vrate').innerText = vRateText;
 }
 
 /**
- * Fetch latest data from OpenSky API
+ * Fetch latest data with proxy fallback and source switching
  */
 async function updateFlightData() {
-    try {
-        let response;
-        try {
-            // Attempt direct fetch first
-            response = await fetch(API_URL);
-            if (!response.ok && response.status === 429) {
-                console.warn('Rate limited, trying proxy...');
-                throw new Error('Rate limit');
-            }
-        } catch (e) {
-            // Fallback to proxy if direct fetch fails (CORS, network, or Rate Limit)
-            console.log('Direct fetch failed, trying proxy...', e);
-            response = await fetch(PROXY_URL + encodeURIComponent(API_URL));
-        }
-        
-        if (!response.ok) {
-            throw new Error(`API returned ${response.status}: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        
-        // Update connection status
-        setConnectionStatus(true);
-        
-        // Update UI timestamp
-        const timeSpan = document.getElementById('last-updated');
-        const now = new Date();
-        timeSpan.innerText = now.toLocaleTimeString();
+    const urls = [
+        API_URLS.ADSB_LOL,
+        API_URLS.OPENSKY
+    ];
+    
+    let success = false;
+    let data = null;
+    let usedSource = 'ADSB_LOL';
 
-        if (!data.states) {
-            document.getElementById('total-flights').innerText = '0';
-            clearAllMarkers();
-            return;
-        }
-
-        const currentStates = data.states;
-        
-        // Animate counter update
-        const totalFlightsEl = document.getElementById('total-flights');
-        totalFlightsEl.innerText = currentStates.length;
-        totalFlightsEl.animate([
-            { transform: 'scale(1.1)', color: '#fff' },
-            { transform: 'scale(1)', color: 'var(--accent)' }
-        ], { duration: 300 });
-        
-        const currentIcaos = new Set();
-        
-        currentStates.forEach(flight => {
-            const icao = flight[0];
-            const callsign = (flight[1] || 'Unknown').trim();
-            const lng = flight[5];
-            const lat = flight[6];
-            const heading = flight[10] || 0;
-            const altitude = flight[7] || 0;
-            const altFt = Math.round(altitude * 3.28084);
-
-            currentIcaos.add(icao);
-
-            // Skip if no position
-            if (lat === null || lng === null) return;
-
-            const isSelected = (selectedFlightIcao === icao);
-            const icon = createPlaneIcon(heading, isSelected);
-
-            if (flightMarkers[icao]) {
-                // Update existing
-                const marker = flightMarkers[icao];
-                marker.setLatLng([lat, lng]);
-                marker.setIcon(icon);
-                
-                // Update popup text if open
-                if (marker.isPopupOpen()) {
-                    marker.setPopupContent(`<strong>${callsign || icao}</strong><br>Alt: ${altFt.toLocaleString()} ft`);
-                }
-                
-                // Update marker reference to raw data
-                marker.flightData = flight;
-            } else {
-                // Create new
-                const popupContent = `<strong>${callsign || icao}</strong><br>Alt: ${altFt.toLocaleString()} ft`;
-                const marker = L.marker([lat, lng], { icon: icon }).bindPopup(popupContent);
-                
-                marker.flightData = flight;
-                
-                marker.on('click', () => {
-                    // Deselect previous
-                    if (selectedFlightIcao && flightMarkers[selectedFlightIcao]) {
-                        const prevMarker = flightMarkers[selectedFlightIcao];
-                        const prevHeading = prevMarker.flightData[10] || 0;
-                        prevMarker.setIcon(createPlaneIcon(prevHeading, false));
-                    }
-                    
-                    selectedFlightIcao = icao;
-                    marker.setIcon(createPlaneIcon(heading, true));
-                    updateSidePanel(marker.flightData);
+    for (const url of urls) {
+        for (const proxy of PROXIES) {
+            try {
+                const response = await fetch(proxy + encodeURIComponent(url), {
+                    signal: AbortSignal.timeout(5000)
                 });
-
-                flightMarkers[icao] = marker;
-                marker.addTo(map);
-            }
-            
-            // If this is the currently selected flight, update the side panel with fresh data
-            if (isSelected) {
-                updateSidePanel(flight);
-            }
-        });
-
-        // Remove stale markers representing flights that have landed or left the bounding box
-        Object.keys(flightMarkers).forEach(icao => {
-            if (!currentIcaos.has(icao)) {
-                map.removeLayer(flightMarkers[icao]);
-                delete flightMarkers[icao];
-                
-                if (selectedFlightIcao === icao) {
-                    selectedFlightIcao = null;
-                    updateSidePanel(null);
+                if (response.ok) {
+                    data = await response.json();
+                    usedSource = url === API_URLS.ADSB_LOL ? 'ADSB_LOL' : 'OPENSKY';
+                    success = true;
+                    break;
                 }
+            } catch (e) {
+                continue;
             }
-        });
-        
-    } catch (error) {
-        console.error('Data fetch error:', error);
-        setConnectionStatus(false);
+        }
+        if (success) break;
     }
+
+    if (!success) {
+        console.error('All fetch attempts failed');
+        setConnectionStatus(false);
+        return;
+    }
+
+    setConnectionStatus(true);
+    const timeSpan = document.getElementById('last-updated');
+    timeSpan.innerText = new Date().toLocaleTimeString();
+
+    let flights = [];
+    if (usedSource === 'ADSB_LOL') {
+        flights = data.ac || [];
+    } else {
+        flights = data.states || [];
+    }
+
+    const totalFlightsEl = document.getElementById('total-flights');
+    totalFlightsEl.innerText = flights.length;
+    
+    const currentIcaos = new Set();
+    
+    flights.forEach(f => {
+        // Normalize coordinates and identification
+        let flight = f;
+        let icao, lat, lon, heading, callsign, altFt;
+
+        if (usedSource === 'ADSB_LOL') {
+            icao = flight.hex;
+            lat = flight.lat;
+            lon = flight.lon;
+            heading = flight.track || 0;
+            callsign = (flight.flight || '').trim() || icao;
+            altFt = flight.alt_baro || 0;
+            flight.source = 'ADSB_LOL';
+        } else {
+            icao = flight[0];
+            callsign = (flight[1] || '').trim() || icao;
+            lon = flight[5];
+            lat = flight[6];
+            heading = flight[10] || 0;
+            altFt = Math.round((flight[7] || 0) * 3.28084);
+            flight.source = 'OPENSKY';
+        }
+
+        if (lat === null || lon === null) return;
+        currentIcaos.add(icao);
+
+        const isSelected = (selectedFlightIcao === icao);
+        const icon = createPlaneIcon(heading, isSelected);
+
+        if (flightMarkers[icao]) {
+            const marker = flightMarkers[icao];
+            marker.setLatLng([lat, lon]);
+            marker.setIcon(icon);
+            marker.flightData = flight;
+            if (marker.isPopupOpen()) {
+                marker.setPopupContent(`<strong>${callsign}</strong><br>Alt: ${altFt.toLocaleString()} ft`);
+            }
+        } else {
+            const popupContent = `<strong>${callsign}</strong><br>Alt: ${altFt.toLocaleString()} ft`;
+            const marker = L.marker([lat, lon], { icon: icon }).bindPopup(popupContent);
+            marker.flightData = flight;
+            
+            marker.on('click', () => {
+                if (selectedFlightIcao && flightMarkers[selectedFlightIcao]) {
+                    const prevMarker = flightMarkers[selectedFlightIcao];
+                    const prevHeading = prevMarker.flightData.source === 'ADSB_LOL' ? 
+                                       prevMarker.flightData.track : prevMarker.flightData[10];
+                    prevMarker.setIcon(createPlaneIcon(prevHeading || 0, false));
+                }
+                selectedFlightIcao = icao;
+                marker.setIcon(createPlaneIcon(heading, true));
+                updateSidePanel(marker.flightData);
+            });
+
+            flightMarkers[icao] = marker;
+            marker.addTo(map);
+        }
+
+        if (isSelected) updateSidePanel(flight);
+    });
+
+    // Remove stale
+    Object.keys(flightMarkers).forEach(icao => {
+        if (!currentIcaos.has(icao)) {
+            map.removeLayer(flightMarkers[icao]);
+            delete flightMarkers[icao];
+            if (selectedFlightIcao === icao) {
+                selectedFlightIcao = null;
+                updateSidePanel(null);
+            }
+        }
+    });
 }
 
 function clearAllMarkers() {
