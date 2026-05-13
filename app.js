@@ -128,18 +128,27 @@ async function updateFlightData() {
     for (const url of urls) {
         for (const proxy of PROXIES) {
             try {
-                // Fix: Only encode the URL if we are using a proxy
                 const finalUrl = proxy ? proxy + encodeURIComponent(url) : url;
-                const response = await fetch(finalUrl, {
-                    signal: AbortSignal.timeout(5000)
-                });
+                console.log(`Attempting fetch: ${finalUrl}`);
+                
+                // More compatible timeout implementation
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 8000);
+                
+                const response = await fetch(finalUrl, { signal: controller.signal });
+                clearTimeout(timeoutId);
+
                 if (response.ok) {
                     data = await response.json();
                     usedSource = url === API_URLS.ADSB_LOL ? 'ADSB_LOL' : 'OPENSKY';
                     success = true;
+                    console.log(`Successfully fetched from ${usedSource} using proxy: ${proxy || 'None'}`);
                     break;
+                } else {
+                    console.warn(`Fetch failed: ${response.status} ${response.statusText}`);
                 }
             } catch (e) {
+                console.error(`Fetch error for ${url} with proxy ${proxy}:`, e);
                 continue;
             }
         }
