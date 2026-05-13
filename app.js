@@ -128,7 +128,9 @@ async function updateFlightData() {
     for (const url of urls) {
         for (const proxy of PROXIES) {
             try {
-                const response = await fetch(proxy + encodeURIComponent(url), {
+                // Fix: Only encode the URL if we are using a proxy
+                const finalUrl = proxy ? proxy + encodeURIComponent(url) : url;
+                const response = await fetch(finalUrl, {
                     signal: AbortSignal.timeout(5000)
                 });
                 if (response.ok) {
