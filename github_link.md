@@ -1,5 +1,4 @@
 # Radar Project Repository
 
-You can find the source code for the Radar project at the following link:
-
+You can find the source code for this project on GitHub:
 [https://github.com/alpamidha-prog/Radar](https://github.com/alpamidha-prog/Radar)
